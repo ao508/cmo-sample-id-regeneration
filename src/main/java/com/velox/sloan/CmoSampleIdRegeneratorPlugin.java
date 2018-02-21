@@ -16,6 +16,7 @@ import org.springframework.http.client.InterceptingClientHttpRequestFactory;
 import org.springframework.http.client.support.BasicAuthorizationInterceptor;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.rmi.RemoteException;
@@ -29,6 +30,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
 
     private String limsRestUrl;
     private String getCmoIdEndpoint;
+    private String propertiesFilePath = "sapio/exemplarlims/plugins/cmo-sample-id-regeneration.properties";
 
     public CmoSampleIdRegeneratorPlugin() {
         setTaskSubmit(true);
@@ -125,7 +127,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
 
     private void init() {
         if (restTemplate == null) {
-            try (InputStream input = getClass().getResourceAsStream("/application.properties")) {
+            try (InputStream input = new FileInputStream(propertiesFilePath)) {
                 Properties prop = new Properties();
                 prop.load(input);
                 limsRestUrl = prop.getProperty("lims.rest.url");
@@ -133,6 +135,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
                 String limsRestPassword = prop.getProperty("lims.rest.password");
                 getCmoIdEndpoint = prop.getProperty("lims.rest.cmoid.endpoint");
                 restTemplate = new RestTemplate();
+
                 addBasicAuth(restTemplate, limsRestUsername, limsRestPassword);
             } catch (IOException ex) {
                 throw new RuntimeException("Cannot read properties file with lims rest connection.", ex);
