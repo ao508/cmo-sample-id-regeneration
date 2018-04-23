@@ -8,29 +8,45 @@ import com.velox.api.plugin.PluginResult;
 import com.velox.api.util.ServerException;
 import com.velox.sapioutils.server.plugin.DefaultGenericPlugin;
 import com.velox.sapioutils.shared.enums.PluginOrder;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.conn.ssl.SSLSocketFactory;
+import org.apache.http.conn.ssl.TrustStrategy;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
 import org.mskcc.util.lims.LimsPluginUtils;
 import org.mskcc.util.rest.Header;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.http.client.InterceptingClientHttpRequestFactory;
 import org.springframework.http.client.support.BasicAuthorizationInterceptor;
 import org.springframework.web.client.RestTemplate;
 
+import javax.net.ssl.SSLContext;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.rmi.RemoteException;
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
-import java.util.Properties;
+import java.security.cert.X509Certificate;
+import java.util.*;
 
+import static java.lang.String.format;
+
+/**
+ * Plugin being run during workflow Adding or Amending CMO Information. In case of changes in Sample Level Info
+ * Record which require change in CMO sample Id, this plugin takes new entered values and retreives new CMO Sample Id
+ * from List Rest and saves new value in Corrected Cmo Sample id field. Before it saves user is informed about the
+ * change and can cancel it. If CMO Sample Id is changed, there is no possibility to save other fields changes
+ * without changing CMO Sample Id.
+ */
 public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
+    private static final Profile DEFAULT_PROFILE = Profile.PROD;
     private RestTemplate restTemplate;
-
     private String limsRestUrl;
     private String getCmoIdEndpoint;
     private String propertiesFilePath = "sapio/exemplarlims/plugins/cmo-sample-id-regeneration.properties";
+    private Profile profile;
 
     public CmoSampleIdRegeneratorPlugin() {
         setTaskSubmit(true);
@@ -52,9 +68,9 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
                 regenerateCMOSampleId(sampleCMOInfoRecord);
             }
         } catch (Throwable e) {
-            logError(String.format("Unable to regenerate CMO Sample Id for workflow: %s, task: %s", activeWorkflow
+            logError(format("Unable to regenerate CMO Sample Id for workflow: %s, task: %s", activeWorkflow
                     .getActiveWorkflowName(), activeTask.getFullName()), e);
-            displayError(String.format("Error while trying to regenerate CMO Sample Id: %s", e.getMessage()));
+            displayError(format("Error while trying to regenerate CMO Sample Id: %s", e.getMessage()));
 
             return new PluginResult(false);
         }
@@ -67,7 +83,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
         String userSampleID = sampleCMOInfoRecord.getStringVal("UserSampleID", user);
         String currentCmoSampleId = sampleCMOInfoRecord.getStringVal("CorrectedCMOID", user);
 
-        logDebug(String.format("Regenerating CMO Sample id for sample: %s", userSampleID));
+        logDebug(format("Regenerating CMO Sample id for sample: %s", userSampleID));
 
         String url = getUrl(sampleCMOInfoRecord, userSampleID);
         ResponseEntity<String> cmoSampleIdResponse = restTemplate.getForEntity(url, String.class);
@@ -81,25 +97,25 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
 
     private void validateResponse(String userSampleID, ResponseEntity<String> cmoSampleIdResponse) {
         if (hasErrors(cmoSampleIdResponse))
-            throw new RuntimeException(String.format("CMO Sample Id for sample %s couldn't be retrieved. Cause: %s",
+            throw new RuntimeException(format("CMO Sample Id for sample %s couldn't be retrieved. Cause: %s",
                     userSampleID, cmoSampleIdResponse.getHeaders().get(Header.ERRORS.name())));
     }
 
     private void replaceOldValueIfAccepted(DataRecord sampleCMOInfoRecord, String userSampleID, String
             currentCmoSampleId, String cmoSampleId) throws ServerException, IoError, InvalidValue, NotFound,
             RemoteException {
-        String message = String.format("CMO Sample Id for sample %s is going to change.\n\n%s - " +
+        String message = format("CMO Sample Id for sample %s is going to change.\n\n%s - " +
                 "current value\n%s - new value", userSampleID, currentCmoSampleId, cmoSampleId);
         logInfo(message);
 
-        String popupMessage = String.format("%s. \n\nIf you don't want to save that changes, cancel " +
+        String popupMessage = format("%s. \n\nIf you don't want to save that changes, cancel " +
                 "the workflow", message, userSampleID);
 
         boolean showOkCancelDialog = clientCallback.showOkCancelDialog("CMO Sample Id changes!",
                 popupMessage);
 
         if (!showOkCancelDialog)
-            throw new RuntimeException(String.format("CMO Sample Id changes not accepted for sample: " +
+            throw new RuntimeException(format("CMO Sample Id changes not accepted for sample: " +
                     "%s", userSampleID));
         sampleCMOInfoRecord.setDataField("CorrectedCMOID", cmoSampleId, user);
     }
@@ -116,7 +132,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
         DataRecord parentSample = retrieveParentSample(sampleCMOInfoRecord);
         String nucleidAcid = parentSample.getStringVal("NAtoExtract", user);
 
-        return String.format("%s/%s?igoId=%s&userSampleId=%s&requestId=%s&patientId=%s&sampleClass=%s&sampleOrigin" +
+        return format("%s/%s?igoId=%s&userSampleId=%s&requestId=%s&patientId=%s&sampleClass=%s&sampleOrigin" +
                         "=%s&specimenType=%s&nucleidAcid=%s", limsRestUrl, getCmoIdEndpoint, igoId, userSampleID,
                 requestId, cmoPatientId, sampleClass, sampleOrigin, specimenType, nucleidAcid);
     }
@@ -134,7 +150,8 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
                 String limsRestUsername = prop.getProperty("lims.rest.username");
                 String limsRestPassword = prop.getProperty("lims.rest.password");
                 getCmoIdEndpoint = prop.getProperty("lims.rest.cmoid.endpoint");
-                restTemplate = new RestTemplate();
+                profile = getProfile(prop);
+                restTemplate = getRestTemplate();
 
                 addBasicAuth(restTemplate, limsRestUsername, limsRestPassword);
             } catch (IOException ex) {
@@ -143,8 +160,60 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
         }
     }
 
+    private Profile getProfile(Properties prop) {
+        String profile = prop.getProperty("profile");
+
+        try {
+            return Profile.fromString(profile);
+        } catch (Exception e) {
+            logError(String.format("Unknown profile with name: %s. Using default one: %s", profile, DEFAULT_PROFILE));
+            return DEFAULT_PROFILE;
+        }
+    }
+
+    private RestTemplate getRestTemplate() {
+        if (profile == Profile.DEV) {
+            return getInsecureRestTemplate();
+        } else {
+            return new RestTemplate();
+        }
+    }
+
+    /**
+     * Insecure Rest Template accepting all host names in certificate. For DEV only!!!
+     * Needed until certificate on tango is self signed and host name is not machine tango.mskc.org
+     *
+     * @return
+     */
+    private RestTemplate getInsecureRestTemplate() {
+        try {
+            TrustStrategy acceptingTrustStrategy = (X509Certificate[] chain, String authType) -> true;
+
+            SSLContext sslContext = org.apache.http.ssl.SSLContexts.custom()
+                    .loadTrustMaterial(null, acceptingTrustStrategy)
+                    .build();
+
+            SSLConnectionSocketFactory csf = new SSLConnectionSocketFactory(sslContext, SSLSocketFactory
+                    .ALLOW_ALL_HOSTNAME_VERIFIER);
+
+            CloseableHttpClient httpClient = HttpClients.custom()
+                    .setSSLSocketFactory(csf)
+                    .build();
+
+            HttpComponentsClientHttpRequestFactory requestFactory =
+                    new HttpComponentsClientHttpRequestFactory();
+
+            requestFactory.setHttpClient(httpClient);
+
+            return new RestTemplate(requestFactory);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     private DataRecord retrieveParentSample(DataRecord sampleCMOInfoRecord) throws IoError, RemoteException, NotFound {
         String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
+        validateIgoId(sampleCMOInfoRecord, igoId);
 
         List<DataRecord> parentSamples = sampleCMOInfoRecord.getParentsOfType("Sample", user);
         for (DataRecord parentSample : parentSamples) {
@@ -153,8 +222,14 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
                 return parentSample;
         }
 
-        throw new RuntimeException(String.format("No parent samples found for Sample Level Info record with igo id: " +
+        throw new RuntimeException(format("No parent samples found for Sample Level Info record with igo id: " +
                 "%s", igoId));
+    }
+
+    private void validateIgoId(DataRecord sampleCMOInfoRecord, String igoId) {
+        if (StringUtils.isEmpty(igoId))
+            throw new RuntimeException(format("Igo id is empty for record: %%s%d", sampleCMOInfoRecord
+                    .getRecordId()));
     }
 
     private boolean hasErrors(ResponseEntity<String> cmoSampleIdResponse) {
@@ -167,5 +242,36 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
                 (username, password));
         restTemplate.setRequestFactory(new InterceptingClientHttpRequestFactory(restTemplate.getRequestFactory(),
                 interceptors));
+    }
+
+    public enum Profile {
+        PROD("prod"),
+        DEV("dev");
+
+        private static final Map<String, Profile> nameToProfile = new HashMap<>();
+
+        static {
+            for (Profile enumValue : values()) {
+                nameToProfile.put(enumValue.name, enumValue);
+            }
+        }
+
+        private final String name;
+
+        Profile(String name) {
+            this.name = name;
+        }
+
+        public static Profile fromString(String name) {
+            if (!nameToProfile.containsKey(name))
+                throw new RuntimeException(format("Unsupported %s: %s", Profile.class.getName(), name));
+
+            return nameToProfile.get(name);
+        }
+
+        @Override
+        public String toString() {
+            return name;
+        }
     }
 }
