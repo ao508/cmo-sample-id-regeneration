@@ -1,5 +1,7 @@
 package com.velox.sloan;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.velox.api.datarecord.DataRecord;
 import com.velox.api.datarecord.InvalidValue;
 import com.velox.api.datarecord.IoError;
@@ -14,13 +16,16 @@ import org.apache.http.conn.ssl.SSLSocketFactory;
 import org.apache.http.conn.ssl.TrustStrategy;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.mskcc.domain.sample.*;
 import org.mskcc.util.lims.LimsPluginUtils;
 import org.mskcc.util.rest.Header;
-import org.springframework.http.ResponseEntity;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.*;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.http.client.InterceptingClientHttpRequestFactory;
 import org.springframework.http.client.support.BasicAuthorizationInterceptor;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 
 import javax.net.ssl.SSLContext;
@@ -30,6 +35,7 @@ import java.io.InputStream;
 import java.rmi.RemoteException;
 import java.security.cert.X509Certificate;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static java.lang.String.format;
 
@@ -64,9 +70,10 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
             init();
             List<DataRecord> sampleCMOInfoRecords = activeTask.getAttachedDataRecords("SampleCMOInfoRecords", user);
             logDebug("Regenerating CMO Sample Ids for all attached Sample CMO Info Records");
-            for (DataRecord sampleCMOInfoRecord : sampleCMOInfoRecords) {
-                regenerateCMOSampleId(sampleCMOInfoRecord);
-            }
+            Map<String, CmoInfoRecord> igoId2CmoInfoRecords = getCmoInfoRecords(sampleCMOInfoRecords);
+
+            fillInNewCmoSampleIds(igoId2CmoInfoRecords);
+            updateIdsIfUserAccepts(igoId2CmoInfoRecords);
         } catch (Throwable e) {
             logError(format("Unable to regenerate CMO Sample Id for workflow: %s, task: %s", activeWorkflow
                     .getActiveWorkflowName(), activeTask.getFullName()), e);
@@ -78,67 +85,132 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
         return new PluginResult(true);
     }
 
-    private void regenerateCMOSampleId(DataRecord sampleCMOInfoRecord) throws RemoteException, IoError, NotFound,
-            ServerException, InvalidValue {
-        String userSampleID = sampleCMOInfoRecord.getStringVal("UserSampleID", user);
-        String currentCmoSampleId = sampleCMOInfoRecord.getStringVal("CorrectedCMOID", user);
+    private Map<String, CmoInfoRecord> getCmoInfoRecords(List<DataRecord> sampleCMOInfoRecords) throws Exception {
+        Map<String, CmoInfoRecord> igoId2CmoInfoRecords = new HashMap<>();
+        for (DataRecord sampleCMOInfoRecord : sampleCMOInfoRecords) {
+            String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
+            igoId2CmoInfoRecords.put(igoId, getCmoInfoRecord(sampleCMOInfoRecord));
+        }
 
-        logDebug(format("Regenerating CMO Sample id for sample: %s", userSampleID));
+        return igoId2CmoInfoRecords;
+    }
 
-        String url = getUrl(sampleCMOInfoRecord, userSampleID);
-        ResponseEntity<String> cmoSampleIdResponse = restTemplate.getForEntity(url, String.class);
-        validateResponse(userSampleID, cmoSampleIdResponse);
+    private void fillInNewCmoSampleIds(Map<String, CmoInfoRecord> igoId2CmoInfoRecords) throws JsonProcessingException {
+        List<CorrectedCmoSampleView> correctedCmoSampleViews = igoId2CmoInfoRecords.values().stream()
+                .map( r -> r.getCorrectedCmoSampleView())
+                .collect(Collectors.toList());
 
-        String cmoSampleId = cmoSampleIdResponse.getBody();
-        if (isCMOSampleIdDifferent(currentCmoSampleId, cmoSampleId)) {
-            replaceOldValueIfAccepted(sampleCMOInfoRecord, userSampleID, currentCmoSampleId, cmoSampleId);
+        Map<String, String> igoId2CmoSampleIds = getNewCmoIds(correctedCmoSampleViews);
+        for (Map.Entry<String, String> igoId2CmoSampleId : igoId2CmoSampleIds.entrySet()) {
+            String igoId = igoId2CmoSampleId.getKey();
+            if (!igoId2CmoInfoRecords.containsKey(igoId))
+                throw new RuntimeException(String.format("Sample %s was not added to Ammend workflow", igoId));
+
+            CmoInfoRecord cmoInfoRecord = igoId2CmoInfoRecords.get(igoId);
+            cmoInfoRecord.setNewCmoId(igoId2CmoSampleId.getValue());
         }
     }
 
-    private void validateResponse(String userSampleID, ResponseEntity<String> cmoSampleIdResponse) {
-        if (hasErrors(cmoSampleIdResponse))
-            throw new RuntimeException(format("CMO Sample Id for sample %s couldn't be retrieved. Cause: %s",
-                    userSampleID, cmoSampleIdResponse.getHeaders().get(Header.ERRORS.name())));
+    private CmoInfoRecord getCmoInfoRecord(DataRecord sampleCMOInfoRecord) throws Exception {
+        String correctedCMOID = sampleCMOInfoRecord.getStringVal("CorrectedCMOID", user);
+        CmoInfoRecord cmoInfoRecord = new CmoInfoRecord(sampleCMOInfoRecord);
+        cmoInfoRecord.setCurrentCmoId(correctedCMOID);
+        cmoInfoRecord.setCorrectedCmoSampleView(convert(sampleCMOInfoRecord));
+
+        return cmoInfoRecord;
     }
 
-    private void replaceOldValueIfAccepted(DataRecord sampleCMOInfoRecord, String userSampleID, String
-            currentCmoSampleId, String cmoSampleId) throws ServerException, IoError, InvalidValue, NotFound,
-            RemoteException {
-        String message = format("CMO Sample Id for sample %s is going to change.\n\n%s - " +
-                "current value\n%s - new value", userSampleID, currentCmoSampleId, cmoSampleId);
-        logInfo(message);
+    private CorrectedCmoSampleView convert(DataRecord sampleCMOInfoRecord) throws Exception {
+        return new SampleCMOInfoRecordToCmoSampleViewConverter().convert(sampleCMOInfoRecord);
+    }
 
-        String popupMessage = format("%s. \n\nIf you don't want to save that changes, cancel " +
-                "the workflow", message, userSampleID);
+    private Map<String, String> getNewCmoIds(List<CorrectedCmoSampleView> correctedCmoSampleViews) throws
+            JsonProcessingException {
+        String correctedViewString = getCorrectedViewString(correctedCmoSampleViews);
+
+        logInfo(String.format("Invoking %s with entity: %s", getUrl(), correctedViewString));
+
+        ResponseEntity<Map<String, String>> cmoSampleIdResponse = restTemplate.exchange(getUrl(), HttpMethod.POST,
+                new HttpEntity<Object>(correctedViewString, getHeaders()), getResponseType());
+
+        validateResponse(cmoSampleIdResponse);
+        Map<String, String> igoIdToCmoSampleId = cmoSampleIdResponse.getBody();
+        logInfo(String.format("New corrected cmo sample ids received: %s", igoIdToCmoSampleId));
+
+        return igoIdToCmoSampleId;
+    }
+
+    private MultiValueMap<String, String> getHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        return headers;
+    }
+
+    private ParameterizedTypeReference<Map<String, String>> getResponseType() {
+        return new ParameterizedTypeReference<Map<String,
+                String>>() {
+        };
+    }
+
+    private String getCorrectedViewString(List<CorrectedCmoSampleView> correctedCmoSampleViews) throws
+            JsonProcessingException {
+        return new ObjectMapper().writeValueAsString(correctedCmoSampleViews);
+    }
+
+    private void updateIdsIfUserAccepts(Map<String, CmoInfoRecord> igoId2CmoInfoRecords) throws Exception {
+        StringBuilder message = new StringBuilder("CMO Sample Ids which are going to be changed: \n");
+
+        if(anyCmoSampleIdChanged(igoId2CmoInfoRecords)) {
+            for (Map.Entry<String, CmoInfoRecord> igoIdToCmoRecord : igoId2CmoInfoRecords.entrySet()) {
+                CmoInfoRecord cmoInfoRecord = igoIdToCmoRecord.getValue();
+                if (cmoSampleIdRequiresChange(cmoInfoRecord))
+                    message.append(String.format("%s -> %s\n", cmoInfoRecord.getCurrentCmoId(), cmoInfoRecord.getNewCmoId
+
+                            ()));
+            }
+
+            logInfo(message.toString());
+
+            validateUserAcceptsChanges(igoId2CmoInfoRecords, message.toString());
+            updateCmoIds(igoId2CmoInfoRecords);
+        }
+    }
+
+    private boolean anyCmoSampleIdChanged(Map<String, CmoInfoRecord> igoId2CmoInfoRecords) {
+        return igoId2CmoInfoRecords.values().stream()
+                .anyMatch(r -> !Objects.equals(r.getCurrentCmoId(), r.getNewCmoId()));
+    }
+
+    private boolean cmoSampleIdRequiresChange(CmoInfoRecord cmoInfoRecord) {
+        return !Objects.equals(cmoInfoRecord.getCurrentCmoId(), cmoInfoRecord.getNewCmoId());
+    }
+
+    private void validateUserAcceptsChanges(Map<String, CmoInfoRecord> igoId2CmoInfoRecords, String message) throws ServerException {
+        String popupMessage = format("%s\n\nIf you don't want to save that changes, cancel " +
+                "the workflow", message);
 
         boolean showOkCancelDialog = clientCallback.showOkCancelDialog("CMO Sample Id changes!",
                 popupMessage);
 
         if (!showOkCancelDialog)
-            throw new RuntimeException(format("CMO Sample Id changes not accepted for sample: " +
-                    "%s", userSampleID));
-        sampleCMOInfoRecord.setDataField("CorrectedCMOID", cmoSampleId, user);
+            throw new RuntimeException(format("CMO Sample Id changes not accepted for: %s", igoId2CmoInfoRecords));
     }
 
-    private String getUrl(DataRecord sampleCMOInfoRecord, String userSampleID) throws
-            IoError, RemoteException, NotFound {
-        String cmoPatientId = sampleCMOInfoRecord.getStringVal("CmoPatientId", user);
-        String sampleClass = sampleCMOInfoRecord.getStringVal("CMOSampleClass", user);
-        String sampleOrigin = sampleCMOInfoRecord.getStringVal("SampleOrigin", user);
-        String specimenType = sampleCMOInfoRecord.getStringVal("SpecimenType", user);
-        String requestId = sampleCMOInfoRecord.getStringVal("RequestId", user);
-        String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
-
-        DataRecord parentSample = retrieveParentSample(sampleCMOInfoRecord);
-        String nucleidAcid = parentSample.getStringVal("NAtoExtract", user);
-
-        return format("%s/%s?igoId=%s&userSampleId=%s&requestId=%s&patientId=%s&sampleClass=%s&sampleOrigin" +
-                        "=%s&specimenType=%s&nucleidAcid=%s", limsRestUrl, getCmoIdEndpoint, igoId, userSampleID,
-                requestId, cmoPatientId, sampleClass, sampleOrigin, specimenType, nucleidAcid);
+    private void updateCmoIds(Map<String, CmoInfoRecord> igoId2CmoInfoRecords) throws IoError, InvalidValue, NotFound, RemoteException {
+        for (Map.Entry<String, CmoInfoRecord> igoId2CmoRecord : igoId2CmoInfoRecords.entrySet()) {
+            CmoInfoRecord cmoInfoRecord = igoId2CmoRecord.getValue();
+            cmoInfoRecord.getRecord().setDataField("CorrectedCMOID", cmoInfoRecord.getNewCmoId(), user);
+        }
     }
 
-    private boolean isCMOSampleIdDifferent(String currentCmoSampleId, String cmoSampleId) {
-        return !Objects.equals(cmoSampleId, currentCmoSampleId);
+    private void validateResponse(ResponseEntity<Map<String, String>> cmoSampleIdResponse) {
+        if (hasErrors(cmoSampleIdResponse))
+            throw new RuntimeException(format("CMO Sample Ids  couldn't be retrieved. Cause: %s", cmoSampleIdResponse
+                    .getHeaders().get(Header.ERRORS.name())));
+    }
+
+    private String getUrl() {
+        return format("%s/%s", limsRestUrl, getCmoIdEndpoint);
     }
 
     private void init() {
@@ -211,28 +283,13 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
         }
     }
 
-    private DataRecord retrieveParentSample(DataRecord sampleCMOInfoRecord) throws IoError, RemoteException, NotFound {
-        String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
-        validateIgoId(sampleCMOInfoRecord, igoId);
-
-        List<DataRecord> parentSamples = sampleCMOInfoRecord.getParentsOfType("Sample", user);
-        for (DataRecord parentSample : parentSamples) {
-            String parentSampleId = parentSample.getStringVal("SampleId", user);
-            if (Objects.equals(parentSampleId, igoId))
-                return parentSample;
-        }
-
-        throw new RuntimeException(format("No parent samples found for Sample Level Info record with igo id: " +
-                "%s", igoId));
-    }
-
     private void validateIgoId(DataRecord sampleCMOInfoRecord, String igoId) {
         if (StringUtils.isEmpty(igoId))
             throw new RuntimeException(format("Igo id is empty for record: %%s%d", sampleCMOInfoRecord
                     .getRecordId()));
     }
 
-    private boolean hasErrors(ResponseEntity<String> cmoSampleIdResponse) {
+    private boolean hasErrors(ResponseEntity<Map<String, String>> cmoSampleIdResponse) {
         return cmoSampleIdResponse.getHeaders().containsKey(Header.ERRORS.name()) && cmoSampleIdResponse.getHeaders()
                 .get(Header.ERRORS.name()).size() > 0;
     }
@@ -244,34 +301,58 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
                 interceptors));
     }
 
-    public enum Profile {
-        PROD("prod"),
-        DEV("dev");
+    private class SampleCMOInfoRecordToCmoSampleViewConverter {
+        public CorrectedCmoSampleView convert(DataRecord sampleCMOInfoRecord) throws NotFound, RemoteException, IoError {
+            String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
 
-        private static final Map<String, Profile> nameToProfile = new HashMap<>();
+            CorrectedCmoSampleView correctedCmoSampleView = new CorrectedCmoSampleView(igoId);
 
-        static {
-            for (Profile enumValue : values()) {
-                nameToProfile.put(enumValue.name, enumValue);
+            correctedCmoSampleView.setPatientId(sampleCMOInfoRecord.getStringVal("CmoPatientId", user));
+            correctedCmoSampleView.setSampleId(sampleCMOInfoRecord.getStringVal("UserSampleID", user));
+            correctedCmoSampleView.setCorrectedCmoId(sampleCMOInfoRecord.getStringVal("CorrectedCMOID", user));
+
+            String cmoSampleClass = sampleCMOInfoRecord.getStringVal("CMOSampleClass", user);
+            if (!StringUtils.isEmpty(cmoSampleClass))
+                correctedCmoSampleView.setSampleClass(SampleClass.fromValue(cmoSampleClass));
+
+            String sampleOrigin = sampleCMOInfoRecord.getStringVal("SampleOrigin", user);
+            if (!StringUtils.isEmpty(sampleOrigin))
+                correctedCmoSampleView.setSampleOrigin(SampleOrigin.fromValue(sampleOrigin));
+
+            String specimenType = sampleCMOInfoRecord.getStringVal("SpecimenType", user);
+
+            if (!StringUtils.isEmpty(specimenType))
+                correctedCmoSampleView.setSpecimenType(SpecimenType.fromValue(specimenType));
+
+            correctedCmoSampleView.setRequestId(sampleCMOInfoRecord.getStringVal("RequestId", user));
+
+            DataRecord parentSample = retrieveParentSample(sampleCMOInfoRecord);
+
+            String naToExtract = parentSample.getStringVal(Sample.NATO_EXTRACT, user);
+            if (!StringUtils.isEmpty(naToExtract))
+                correctedCmoSampleView.setNucleidAcid(NucleicAcid.fromValue(naToExtract));
+
+            SampleType sampleType = SampleType.fromString(parentSample.getStringVal(Sample.EXEMPLAR_SAMPLE_TYPE, user));
+            correctedCmoSampleView.setSampleType(sampleType);
+
+            logInfo(String.format("Sample CMO Info record for sample %s converted: %s", igoId, correctedCmoSampleView));
+
+            return correctedCmoSampleView;
+        }
+
+        private DataRecord retrieveParentSample(DataRecord sampleCMOInfoRecord) throws IoError, RemoteException, NotFound {
+            String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
+            validateIgoId(sampleCMOInfoRecord, igoId);
+
+            List<DataRecord> parentSamples = sampleCMOInfoRecord.getParentsOfType("Sample", user);
+            for (DataRecord parentSample : parentSamples) {
+                String parentSampleId = parentSample.getStringVal("SampleId", user);
+                if (Objects.equals(parentSampleId, igoId))
+                    return parentSample;
             }
-        }
 
-        private final String name;
-
-        Profile(String name) {
-            this.name = name;
-        }
-
-        public static Profile fromString(String name) {
-            if (!nameToProfile.containsKey(name))
-                throw new RuntimeException(format("Unsupported %s: %s", Profile.class.getName(), name));
-
-            return nameToProfile.get(name);
-        }
-
-        @Override
-        public String toString() {
-            return name;
+            throw new RuntimeException(format("No parent samples found for Sample Level Info record with igo id: " +
+                    "%s", igoId));
         }
     }
 }

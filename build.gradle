@@ -17,11 +17,12 @@ dependencies {
     compile group: 'com.velox.internalproducts', name: 'veloxapi', version: '9.5.1-b633'
     compile group: 'com.velox.internalproducts', name: 'sapioutils', version: '7.1.1-LIMS9.5.0'
 
-    compile group: 'org.mskcc.common', name: 'common-domain', version: '2.5.0'
+    compile group: 'org.mskcc.common', name: 'common-domain', version: '2.7.0-SNAPSHOT'
 
     compile group: 'biz.source_code', name: 'base64coder', version: '2010-09-21'
 
     compile group: 'org.apache.httpcomponents', name: 'httpclient', version: '4.5'
+    compile("com.fasterxml.jackson.core:jackson-databind")
 
     testCompile group: 'junit', name: 'junit', version: '4.12'
 }
