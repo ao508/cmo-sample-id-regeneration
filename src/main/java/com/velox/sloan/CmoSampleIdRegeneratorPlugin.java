@@ -2,6 +2,8 @@ package com.velox.sloan;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.Multimap;
 import com.velox.api.datarecord.DataRecord;
 import com.velox.api.datarecord.InvalidValue;
 import com.velox.api.datarecord.IoError;
@@ -53,6 +55,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
     private String getCmoIdEndpoint;
     private String propertiesFilePath = "sapio/exemplarlims/plugins/cmo-sample-id-regeneration.properties";
     private Profile profile;
+    private Multimap<String, String> sample2Errors = HashMultimap.create();
 
     public CmoSampleIdRegeneratorPlugin() {
         setTaskSubmit(true);
@@ -77,7 +80,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
         } catch (Throwable e) {
             logError(format("Unable to regenerate CMO Sample Id for workflow: %s, task: %s", activeWorkflow
                     .getActiveWorkflowName(), activeTask.getFullName()), e);
-            displayError(format("Error while trying to regenerate CMO Sample Id: %s", e.getMessage()));
+            displayError(format("Unable to generate CMO Sample Id: \n%s \n%s", getSampleRecordsErrors(), e.getMessage()));
 
             return new PluginResult(false);
         }
@@ -85,8 +88,26 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
         return new PluginResult(true);
     }
 
+    private String getSampleRecordsErrors() {
+        StringBuilder errors = new StringBuilder();
+
+        for (Map.Entry<String, Collection<String>> sample2Error : sample2Errors.asMap().entrySet()) {
+            errors.append(sample2Error.getKey()).append(":\n");
+            for (String error : sample2Error.getValue()) {
+                errors.append("\t- ").append(error).append("\n");
+            }
+        }
+
+        return errors.toString();
+    }
+
     private Map<String, CmoInfoRecord> getCmoInfoRecords(List<DataRecord> sampleCMOInfoRecords) throws Exception {
         Map<String, CmoInfoRecord> igoId2CmoInfoRecords = new HashMap<>();
+        validate(sampleCMOInfoRecords);
+
+        if(sample2Errors.size() > 0)
+            throw new RuntimeException();
+
         for (DataRecord sampleCMOInfoRecord : sampleCMOInfoRecords) {
             String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
             igoId2CmoInfoRecords.put(igoId, getCmoInfoRecord(sampleCMOInfoRecord));
@@ -301,6 +322,107 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
                 interceptors));
     }
 
+    private void validate(List<DataRecord> sampleCMOInfoRecords) throws NotFound, RemoteException, IoError  {
+        for (DataRecord sampleCMOInfoRecord : sampleCMOInfoRecords) {
+            validate(sampleCMOInfoRecord);
+        }
+    }
+
+    private void validate(DataRecord sampleCMOInfoRecord) throws NotFound, RemoteException {
+        String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
+        String specimenTypeStr = sampleCMOInfoRecord.getStringVal("SpecimenType", user);
+
+        if (!StringUtils.isEmpty(specimenTypeStr)) {
+            try {
+                SpecimenType specimenType = SpecimenType.fromValue(specimenTypeStr);
+
+                if(specimenType == SpecimenType.CELLLINE) {
+                    String requestId = sampleCMOInfoRecord.getStringVal("RequestId", user);
+                    if(requestId.isEmpty())
+                        sample2Errors.put(igoId, "Request is id empty");
+                } else {
+                    validateCmoPatientId(sampleCMOInfoRecord, igoId);
+                    validateCmoSampleClass(sampleCMOInfoRecord, igoId);
+                    validateSampleOrigin(sampleCMOInfoRecord, igoId);
+
+                    DataRecord parentSample = retrieveParentSample(sampleCMOInfoRecord);
+
+                    validateNucleidAcid(igoId, parentSample);
+                    validateSampleType(igoId, parentSample);
+                }
+            } catch (Exception e) {
+                sample2Errors.put(igoId, e.getMessage());
+            }
+        } else {
+            sample2Errors.put(igoId, "Specimen Type is empty");
+        }
+    }
+
+    private void validateSampleType(String igoId, DataRecord parentSample) {
+        try {
+            SampleType.fromString(parentSample.getStringVal(Sample.EXEMPLAR_SAMPLE_TYPE, user));
+        } catch (Exception e) {
+            sample2Errors.put(igoId, e.getMessage());
+        }
+    }
+
+    private void validateNucleidAcid(String igoId, DataRecord parentSample) throws NotFound, RemoteException {
+        String naToExtract = parentSample.getStringVal(Sample.NATO_EXTRACT, user);
+        if (!StringUtils.isEmpty(naToExtract)) {
+            try {
+                NucleicAcid.fromValue(naToExtract);
+            } catch (Exception e) {
+                sample2Errors.put(igoId, e.getMessage());
+            }
+        } else {
+            sample2Errors.put(igoId, "Nucleid acid is empty");
+        }
+    }
+
+    private void validateSampleOrigin(DataRecord sampleCMOInfoRecord, String igoId) throws NotFound, RemoteException {
+        String sampleOrigin = sampleCMOInfoRecord.getStringVal("SampleOrigin", user);
+        if (!StringUtils.isEmpty(sampleOrigin)) {
+            try {
+                SampleOrigin.fromValue(sampleOrigin);
+            } catch (Exception e) {
+                sample2Errors.put(igoId, e.getMessage());
+            }
+        }
+    }
+
+    private void validateCmoPatientId(DataRecord sampleCMOInfoRecord, String igoId) throws NotFound, RemoteException {
+        String cmoPatientId = sampleCMOInfoRecord.getStringVal("CmoPatientId", user);
+
+        if(cmoPatientId.isEmpty())
+            sample2Errors.put(igoId, "Cmo Patient id is empty");
+    }
+
+    private void validateCmoSampleClass(DataRecord sampleCMOInfoRecord, String igoId) throws NotFound, RemoteException {
+        String cmoSampleClass = sampleCMOInfoRecord.getStringVal("CMOSampleClass", user);
+        if (!StringUtils.isEmpty(cmoSampleClass)) {
+            try {
+                SampleClass.fromValue(cmoSampleClass);
+            } catch (Exception e) {
+                sample2Errors.put(igoId, e.getMessage());
+            }
+        }
+    }
+
+    private DataRecord retrieveParentSample(DataRecord sampleCMOInfoRecord) throws IoError, RemoteException, NotFound {
+        String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
+        validateIgoId(sampleCMOInfoRecord, igoId);
+
+        List<DataRecord> parentSamples = sampleCMOInfoRecord.getParentsOfType("Sample", user);
+        for (DataRecord parentSample : parentSamples) {
+            String parentSampleId = parentSample.getStringVal("SampleId", user);
+            if (Objects.equals(parentSampleId, igoId))
+                return parentSample;
+        }
+
+        throw new RuntimeException(format("No parent samples found for Sample Level Info record with igo id: " +
+                "%s", igoId));
+    }
+
     private class SampleCMOInfoRecordToCmoSampleViewConverter {
         public CorrectedCmoSampleView convert(DataRecord sampleCMOInfoRecord) throws NotFound, RemoteException, IoError {
             String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
@@ -340,19 +462,6 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
             return correctedCmoSampleView;
         }
 
-        private DataRecord retrieveParentSample(DataRecord sampleCMOInfoRecord) throws IoError, RemoteException, NotFound {
-            String igoId = sampleCMOInfoRecord.getStringVal("SampleId", user);
-            validateIgoId(sampleCMOInfoRecord, igoId);
 
-            List<DataRecord> parentSamples = sampleCMOInfoRecord.getParentsOfType("Sample", user);
-            for (DataRecord parentSample : parentSamples) {
-                String parentSampleId = parentSample.getStringVal("SampleId", user);
-                if (Objects.equals(parentSampleId, igoId))
-                    return parentSample;
-            }
-
-            throw new RuntimeException(format("No parent samples found for Sample Level Info record with igo id: " +
-                    "%s", igoId));
-        }
     }
 }
