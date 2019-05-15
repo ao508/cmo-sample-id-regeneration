@@ -347,7 +347,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
 
                     DataRecord parentSample = retrieveParentSample(sampleCMOInfoRecord);
 
-                    validateNucleidAcid(igoId, parentSample);
+                    //validateNucleidAcid(igoId, parentSample);
                     validateSampleType(igoId, parentSample);
                 }
             } catch (Exception e) {
@@ -375,7 +375,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
                 sample2Errors.put(igoId, e.getMessage());
             }
         } else {
-            sample2Errors.put(igoId, "Nucleid acid is empty");
+            sample2Errors.put(igoId, "Nucleic acid is empty");
         }
     }
 
