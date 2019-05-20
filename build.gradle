@@ -1,5 +1,5 @@
 group 'com.velox.sloan'
-version '0.3.0'
+version '0.3.1'
 
 apply plugin: 'java'
 
@@ -14,25 +14,22 @@ repositories {
 }
 
 dependencies {
-    compile group: 'org.mskcc.common', name: 'common-domain', version: '2.12.0'
+    compile group: 'org.springframework', name: 'spring-web', version: '4.3.13.RELEASE'
+    compile group: 'commons-httpclient', name: 'commons-httpclient', version: '3.1'
+    compile group: 'org.apache.httpcomponents', name: 'httpclient', version: '4.5'
     
+    compile group: 'org.mskcc.common', name: 'common-domain', version: '2.12.0'
     compile 'com.velox.internalproducts:veloxapi:10.6.1-b777'
     compile 'com.velox.internalproducts:sapioutils:15.0.0-LIMS10.6.1'
 
     compile group: 'biz.source_code', name: 'base64coder', version: '2010-09-21'
-
-    compile group: 'org.springframework', name: 'spring-web', version: '4.3.13.RELEASE'
-    compile group: 'commons-httpclient', name: 'commons-httpclient', version: '3.1'
-    compile group: 'org.apache.httpcomponents', name: 'httpclient', version: '4.5'
-    compile("com.fasterxml.jackson.core:jackson-databind")
 
     testCompile group: 'junit', name: 'junit', version: '4.12'
 }
 
 task fatJar(type: Jar) {
     manifest {
-        attributes 'Implementation-Title': 'LIMS Velox Plugins',
-                'Implementation-Version': version
+        attributes 'Implementation-Title': 'LIMS Velox Plugins', 'Implementation-Version': version
     }
     baseName = archivesBaseName + '-all'
     from { configurations.compile.collect { it.isDirectory() ? it : zipTree(it) } }
@@ -43,7 +40,6 @@ jar {
     manifest {
         attributes("Implementation-Title": "Validator Plugin",
                 "Implementation-Version": version,
-                //'Class-Path': configurations.compile.collect { '../lib/' + it.getName() }.join(' ')
         )
     }
 }

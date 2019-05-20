@@ -64,17 +64,19 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
 
     @Override
     protected boolean shouldRun() throws Throwable {
-        return new LimsPluginUtils(managerContext).shouldRunPlugin();
+        boolean result = new LimsPluginUtils(managerContext).shouldRunPlugin();
+        return result;
     }
 
     @Override
     protected PluginResult run() throws Throwable {
+        logInfo("Starting CMO Sample ID generation.");
         try {
             init();
             List<DataRecord> sampleCMOInfoRecords = activeTask.getAttachedDataRecords("SampleCMOInfoRecords", user);
-            logDebug("Regenerating CMO Sample Ids for all attached Sample CMO Info Records");
+            logInfo("Regenerating CMO Sample Ids for all attached Sample CMO Info Records");
             Map<String, CmoInfoRecord> igoId2CmoInfoRecords = getCmoInfoRecords(sampleCMOInfoRecords);
-
+            logInfo("Found records: " + igoId2CmoInfoRecords.size());
             fillInNewCmoSampleIds(igoId2CmoInfoRecords);
             updateIdsIfUserAccepts(igoId2CmoInfoRecords);
         } catch (Throwable e) {
@@ -151,8 +153,8 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
 
         logInfo(String.format("Invoking %s with entity: %s", getUrl(), correctedViewString));
 
-        ResponseEntity<Map<String, String>> cmoSampleIdResponse = restTemplate.exchange(getUrl(), HttpMethod.POST,
-                new HttpEntity<Object>(correctedViewString, getHeaders()), getResponseType());
+        ResponseEntity<HashMap<String, String>> cmoSampleIdResponse = restTemplate.exchange(getUrl(), HttpMethod.POST,
+                new HttpEntity<Object>(correctedViewString, getHeaders()), new ParameterizedTypeReference<HashMap<String, String>>() {});
 
         validateResponse(cmoSampleIdResponse);
         Map<String, String> igoIdToCmoSampleId = cmoSampleIdResponse.getBody();
@@ -167,12 +169,6 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
         return headers;
     }
 
-    private ParameterizedTypeReference<Map<String, String>> getResponseType() {
-        return new ParameterizedTypeReference<Map<String,
-                String>>() {
-        };
-    }
-
     private String getCorrectedViewString(List<CorrectedCmoSampleView> correctedCmoSampleViews) throws
             JsonProcessingException {
         return new ObjectMapper().writeValueAsString(correctedCmoSampleViews);
@@ -185,9 +181,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
             for (Map.Entry<String, CmoInfoRecord> igoIdToCmoRecord : igoId2CmoInfoRecords.entrySet()) {
                 CmoInfoRecord cmoInfoRecord = igoIdToCmoRecord.getValue();
                 if (cmoSampleIdRequiresChange(cmoInfoRecord))
-                    message.append(String.format("%s -> %s\n", cmoInfoRecord.getCurrentCmoId(), cmoInfoRecord.getNewCmoId
-
-                            ()));
+                    message.append(String.format("%s -> %s\n", cmoInfoRecord.getCurrentCmoId(), cmoInfoRecord.getNewCmoId()));
             }
 
             logInfo(message.toString());
@@ -224,7 +218,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
         }
     }
 
-    private void validateResponse(ResponseEntity<Map<String, String>> cmoSampleIdResponse) {
+    private void validateResponse(ResponseEntity<HashMap<String, String>> cmoSampleIdResponse) {
         if (hasErrors(cmoSampleIdResponse))
             throw new RuntimeException(format("CMO Sample Ids  couldn't be retrieved. Cause: %s", cmoSampleIdResponse
                     .getHeaders().get(Header.ERRORS.name())));
@@ -310,7 +304,7 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
                     .getRecordId()));
     }
 
-    private boolean hasErrors(ResponseEntity<Map<String, String>> cmoSampleIdResponse) {
+    private boolean hasErrors(ResponseEntity<HashMap<String, String>> cmoSampleIdResponse) {
         return cmoSampleIdResponse.getHeaders().containsKey(Header.ERRORS.name()) && cmoSampleIdResponse.getHeaders()
                 .get(Header.ERRORS.name()).size() > 0;
     }
@@ -347,7 +341,6 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
 
                     DataRecord parentSample = retrieveParentSample(sampleCMOInfoRecord);
 
-                    //validateNucleidAcid(igoId, parentSample);
                     validateSampleType(igoId, parentSample);
                 }
             } catch (Exception e) {
@@ -363,19 +356,6 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
             SampleType.fromString(parentSample.getStringVal(Sample.EXEMPLAR_SAMPLE_TYPE, user));
         } catch (Exception e) {
             sample2Errors.put(igoId, e.getMessage());
-        }
-    }
-
-    private void validateNucleidAcid(String igoId, DataRecord parentSample) throws NotFound, RemoteException {
-        String naToExtract = parentSample.getStringVal(Sample.NATO_EXTRACT, user);
-        if (!StringUtils.isEmpty(naToExtract)) {
-            try {
-                NucleicAcid.fromValue(naToExtract);
-            } catch (Exception e) {
-                sample2Errors.put(igoId, e.getMessage());
-            }
-        } else {
-            sample2Errors.put(igoId, "Nucleic acid is empty");
         }
     }
 
@@ -461,7 +441,5 @@ public class CmoSampleIdRegeneratorPlugin extends DefaultGenericPlugin {
 
             return correctedCmoSampleView;
         }
-
-
     }
 }
